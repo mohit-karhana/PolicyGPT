@@ -1,0 +1,70 @@
+services:
+  api:
+    build: .
+    # Apply migrations, then start the API with hot reload for development.
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    ports:
+      # Host port 8001 because another dev server occupies 8000 on this machine.
+      - "8001:8000"
+    # .env provides LLM_API_KEY etc.; `environment` below overrides the
+    # connection URLs so containers always use the service hostnames.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/policygpt
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  celery:
+    build: .
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/policygpt
+      REDIS_URL: redis://redis:6379/0
+    # Same bind mount as the api service, so the worker sees uploaded files
+    # (and code changes) without rebuilding.
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    # Official Postgres image with the pgvector extension pre-installed.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: policygpt
+    ports:
+      # Host port 5433 to avoid clashing with a locally installed Postgres.
+      # Inside the compose network the API still connects to postgres:5432.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d policygpt"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Celery broker and result backend.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:
